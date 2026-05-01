@@ -1,0 +1,4 @@
+libgl1-mesa-glx
+libglib2.0-0
+tesseract-ocr          # if you still want OCR
+tesseract-ocr-eng
