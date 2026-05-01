@@ -1,549 +1,296 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Fri May  1 10:05:34 2026
-
-@author: Admin
-"""
-# app.py
-
-```python
 import streamlit as st
 import cv2
 import numpy as np
-from PIL import Image
-import torch
-import torch.nn as nn
-import os
-from streamlit_cropper import st_cropper
 import pandas as pd
 import matplotlib.pyplot as plt
+import io
+import zipfile
 
-# =========================
-# PAGE CONFIG
-# =========================
-st.set_page_config(
-    page_title="Ancient Script Enhancement",
-    page_icon="📜",
-    layout="wide"
-)
+# --------------------------------------------------
+# Helper functions
+# --------------------------------------------------
+def apply_hist_eq(img):
+    """Global histogram equalization"""
+    if len(img.shape) == 3:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = img
+    eq = cv2.equalizeHist(gray)
+    return cv2.cvtColor(eq, cv2.COLOR_GRAY2BGR)
 
-# =========================
-# CUSTOM CSS
-# =========================
+def apply_clahe(img, clip_limit, grid_size):
+    """CLAHE adaptive equalization"""
+    if len(img.shape) == 3:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = img
+    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(grid_size, grid_size))
+    eq = clahe.apply(gray)
+    return cv2.cvtColor(eq, cv2.COLOR_GRAY2BGR)
+
+def apply_sharpen(img, strength):
+    """Sharpen using custom kernel"""
+    kernel = np.array([[0, -1, 0],
+                       [-1, 4 + strength, -1],
+                       [0, -1, 0]])
+    sharp = cv2.filter2D(img, -1, kernel)
+    return sharp
+
+def apply_denoise(img, h, template_window, search_window):
+    """Non-local means denoising"""
+    return cv2.fastNlMeansDenoisingColored(img, None, h, h, template_window, search_window)
+
+def adjust_brightness_contrast(img, alpha, beta):
+    """alpha = contrast, beta = brightness"""
+    return cv2.convertScaleAbs(img, alpha=alpha, beta=beta)
+
+def compute_accuracy(img_original, img_enhanced):
+    """Contrast-based 'accuracy' (higher is better)"""
+    def contrast(img):
+        if len(img.shape) == 3:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = img
+        return gray.std()
+    c_orig = contrast(img_original)
+    c_enh = contrast(img_enhanced)
+    if c_orig == 0:
+        return 50.0
+    improvement = (c_enh - c_orig) / c_orig * 100
+    return max(0.0, min(100.0, improvement))
+
+def get_histogram(img):
+    """Compute grayscale histogram"""
+    if len(img.shape) == 3:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = img
+    hist = cv2.calcHist([gray], [0], None, [256], [0, 256])
+    return hist
+
+# --------------------------------------------------
+# Streamlit UI
+# --------------------------------------------------
+st.set_page_config(page_title="Ancient Script Enhancer", layout="wide")
+
+# College Header
 st.markdown("""
-<style>
-.stApp {
-    background: linear-gradient(rgba(255,255,255,0.92), rgba(255,255,255,0.92)),
-    url('https://www.transparenttextures.com/patterns/old-map.png');
-}
-
-.title {
-    text-align:center;
-    font-size:50px;
-    font-weight:bold;
-    color:#1E3C72;
-}
-
-.subtitle {
-    text-align:center;
-    font-size:20px;
-    color:gray;
-}
-
-.card {
-    padding:25px;
-    border-radius:18px;
-    color:white;
-    text-align:center;
-    margin:10px;
-}
-
-.sidebar .sidebar-content {
-    background: linear-gradient(180deg,#1E3C72,#2A5298);
-}
-</style>
+<div style='background-color:#2E4057; padding:10px; border-radius:10px; text-align:center; margin-bottom:20px'>
+    <h3 style='color:white; margin:0'>Govt. First Grade College for Women, Jamkhandi</h3>
+    <p style='color:#E0E0E0; margin:0'>Dept. of Computer Science and Application</p>
+</div>
 """, unsafe_allow_html=True)
 
-# =========================
-# SIDEBAR
-# =========================
-st.sidebar.title("📜 Script AI")
-st.sidebar.write("Intelligent Manuscript Enhancer")
+st.title("Ancient Script Enhancement Tool")
 
-menu = st.sidebar.radio(
-    "📂 Navigation",
-    [
-        "🏠 Home",
-        "⬆️ Upload Image",
-        "✨ Enhance & Compare",
-        "📊 Results Dashboard",
-        "ℹ️ About"
-    ]
-)
+menu = st.sidebar.radio("Navigate", ["Enhancement", "Dashboard", "About"])
 
-st.sidebar.success("🟢 System Ready")
+# Session state
+if "results" not in st.session_state:
+    st.session_state["results"] = {}
+if "comparison_images" not in st.session_state:
+    st.session_state["comparison_images"] = []  # each: (original, enhanced, method)
 
 # =========================
-# MODEL
+# ENHANCEMENT PAGE
 # =========================
-class ConvBlock(nn.Module):
-    def __init__(self, in_ch, out_ch):
-        super().__init__()
+if menu == "Enhancement":
+    st.header("Enhance an Ancient Script Image")
 
-        self.block = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, 3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(out_ch, out_ch, 3, padding=1),
-            nn.ReLU()
-        )
+    uploaded_file = st.file_uploader("Choose an image", type=["jpg", "jpeg", "png"])
+    if uploaded_file is not None:
+        # Read image
+        file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+        original = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+        if original is None:
+            st.error("Cannot read image. Please try another file.")
+            st.stop()
 
-    def forward(self, x):
-        return self.block(x)
+        original_rgb = cv2.cvtColor(original, cv2.COLOR_BGR2RGB)
 
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            st.subheader("Original Image")
+            st.image(original_rgb, use_container_width=True)
+            # Histogram
+            hist = get_histogram(original)
+            fig_hist, ax = plt.subplots()
+            ax.plot(hist, color='black')
+            ax.set_title("Original Histogram")
+            ax.set_xlabel("Pixel intensity")
+            ax.set_ylabel("Frequency")
+            st.pyplot(fig_hist)
 
-class UNet(nn.Module):
-    def __init__(self):
-        super().__init__()
+        with col2:
+            st.subheader("Enhancement Settings")
+            method = st.selectbox("Method", 
+                                  ["Histogram Equalization", "CLAHE", "Sharpening", "Denoising"])
 
-        self.enc1 = ConvBlock(1, 32)
-        self.final = nn.Conv2d(32, 1, 1)
+            # Method-specific parameters
+            if method == "CLAHE":
+                clip_limit = st.slider("Clip limit", 1.0, 5.0, 2.0, 0.1)
+                grid_size = st.slider("Tile grid size", 4, 16, 8, 2)
+            elif method == "Sharpening":
+                strength = st.slider("Sharpening strength", 0.5, 3.0, 1.0, 0.1)
+            elif method == "Denoising":
+                h = st.slider("Denoising strength (h)", 3, 15, 10, 1)
+                template_window = st.slider("Template window size", 5, 15, 7, 2)
+                search_window = st.slider("Search window size", 11, 25, 21, 2)
 
-    def forward(self, x):
-        x = self.enc1(x)
-        x = self.final(x)
-        return torch.sigmoid(x)
+            # Brightness / Contrast
+            contrast_val = st.slider("Contrast", 0.5, 2.0, 1.0, 0.01)
+            brightness_val = st.slider("Brightness", -50, 50, 0, 1)
 
+            if st.button("Enhance Now", type="primary"):
+                with st.spinner("Enhancing..."):
+                    try:
+                        # Apply selected method
+                        if method == "Histogram Equalization":
+                            enhanced = apply_hist_eq(original)
+                        elif method == "CLAHE":
+                            enhanced = apply_clahe(original, clip_limit, grid_size)
+                        elif method == "Sharpening":
+                            enhanced = apply_sharpen(original, strength)
+                        elif method == "Denoising":
+                            enhanced = apply_denoise(original, h, template_window, search_window)
+                        else:
+                            enhanced = original.copy()
 
-@st.cache_resource
+                        # Fine-tuning
+                        enhanced = adjust_brightness_contrast(enhanced, contrast_val, brightness_val)
 
-def load_model():
-    model = UNet()
+                        # Compute accuracy
+                        acc = compute_accuracy(original, enhanced)
+                        st.session_state["results"][method] = acc
+                        st.session_state["comparison_images"].append((original.copy(), enhanced.copy(), method))
 
-    if os.path.exists("model.pth"):
-        model.load_state_dict(torch.load("model.pth", map_location="cpu"))
-        status = "✅ Deep Learning Model Loaded"
+                        st.success(f"Enhancement successful! Accuracy (contrast improvement): {acc:.2f}%")
+
+                        enhanced_rgb = cv2.cvtColor(enhanced, cv2.COLOR_BGR2RGB)
+                        st.image(enhanced_rgb, caption=f"Enhanced ({method})", use_container_width=True)
+
+                        # Enhanced histogram
+                        hist_enh = get_histogram(enhanced)
+                        fig_hist2, ax2 = plt.subplots()
+                        ax2.plot(hist_enh, color='red')
+                        ax2.set_title("Enhanced Histogram")
+                        ax2.set_xlabel("Pixel intensity")
+                        ax2.set_ylabel("Frequency")
+                        st.pyplot(fig_hist2)
+
+                        # Download button
+                        _, buffer = cv2.imencode('.png', enhanced)
+                        st.download_button(
+                            label="Download Enhanced Image",
+                            data=buffer.tobytes(),
+                            file_name=f"{method.replace(' ', '_')}_enhanced.png",
+                            mime="image/png"
+                        )
+
+                    except Exception as e:
+                        st.error(f"Enhancement failed: {str(e)}")
+
+    # Batch processing (optional)
+    with st.expander("Batch Processing (multiple images)"):
+        batch_files = st.file_uploader("Upload several images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+        if batch_files:
+            batch_method = st.selectbox("Method for batch", 
+                                        ["Histogram Equalization", "CLAHE", "Sharpening", "Denoising"],
+                                        key="batch_method")
+            if st.button("Process Batch"):
+                zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(zip_buffer, "w") as zf:
+                    for idx, file in enumerate(batch_files):
+                        bytes_data = np.asarray(bytearray(file.read()), dtype=np.uint8)
+                        img = cv2.imdecode(bytes_data, cv2.IMREAD_COLOR)
+                        if img is None:
+                            continue
+                        if batch_method == "Histogram Equalization":
+                            enh = apply_hist_eq(img)
+                        elif batch_method == "CLAHE":
+                            enh = apply_clahe(img, 2.0, 8)
+                        elif batch_method == "Sharpening":
+                            enh = apply_sharpen(img, 1.0)
+                        else:
+                            enh = apply_denoise(img, 10, 7, 21)
+                        _, buf = cv2.imencode('.png', enh)
+                        zf.writestr(f"enhanced_{idx}.png", buf.tobytes())
+                st.download_button("Download All as ZIP", data=zip_buffer.getvalue(),
+                                   file_name="batch_enhanced.zip", mime="application/zip")
+                st.success(f"Processed {len(batch_files)} images.")
+
+# =========================
+# DASHBOARD PAGE
+# =========================
+elif menu == "Dashboard":
+    st.header("Results Dashboard")
+
+    if not st.session_state["results"] and not st.session_state["comparison_images"]:
+        st.warning("No enhancement results yet. Go to the Enhancement page and run some methods.")
     else:
-        status = "⚡ Smart Enhancement Enabled"
-
-    model.eval()
-    return model, status
-
-
-model, model_status = load_model()
-
-# =========================
-# IMAGE PROCESSING METHODS
-# =========================
-def preprocess(image):
-    return cv2.cvtColor(np.array(image), cv2.COLOR_RGB2GRAY)
-
-
-def clahe(img):
-    return cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(img)
-
-
-def denoise(img):
-    return cv2.fastNlMeansDenoising(img, None, 30, 7, 21)
-
-
-def sharpen(img):
-    kernel = np.array([
-        [0, -1, 0],
-        [-1, 5, -1],
-        [0, -1, 0]
-    ])
-
-    return cv2.filter2D(img, -1, kernel)
-
-
-def edge_enhance(img):
-    edges = cv2.Canny(img, 50, 150)
-    return cv2.addWeighted(img, 0.8, edges, 0.2, 0)
-
-
-def super_resolution(img):
-    try:
-        sr = cv2.dnn_superres.DnnSuperResImpl_create()
-        sr.readModel("ESPCN_x2.pb")
-        sr.setModel("espcn", 2)
-        return sr.upsample(img)
-
-    except:
-        return img
-
-
-def deep_enhance(img):
-    if not os.path.exists("model.pth"):
-        return clahe(img)
-
-    temp = cv2.resize(img, (256, 256)) / 255.0
-    tensor = torch.tensor(temp).unsqueeze(0).unsqueeze(0).float()
-
-    with torch.no_grad():
-        out = model(tensor)
-
-    out = (out.squeeze().numpy() * 255).astype(np.uint8)
-
-    return cv2.resize(out, (img.shape[1], img.shape[0]))
-
-
-def calculate_accuracy(original, enhanced):
-    mse = np.mean((original.astype(np.float32) - enhanced.astype(np.float32)) ** 2)
-    accuracy = 100 - (mse / (255 ** 2)) * 100
-    return max(0, accuracy)
-
-
-# =========================
-# SCRIPT VALIDATION
-# =========================
-def is_script_image(image):
-    img = np.array(image)
-    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-
-    edges = cv2.Canny(gray, 50, 150)
-    edge_density = np.sum(edges > 0) / edges.size
-
-    _, thresh = cv2.threshold(
-        gray,
-        0,
-        255,
-        cv2.THRESH_BINARY + cv2.THRESH_OTSU
-    )
-
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(thresh)
-
-    small_components = 0
-
-    for i in range(1, num_labels):
-        area = stats[i, cv2.CC_STAT_AREA]
-
-        if 20 < area < 1500:
-            small_components += 1
-
-    return edge_density > 0.1 and small_components > 80
-
-
-# =========================
-# HOME PAGE
-# =========================
-if menu == "🏠 Home":
-
-    st.markdown("<h1 class='title'>📜 Ancient Script Enhancement</h1>", unsafe_allow_html=True)
-
-    st.markdown(
-        "<p class='subtitle'>AI-powered restoration of historical manuscripts</p>",
-        unsafe_allow_html=True
-    )
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        st.markdown("""
-        <div class='card' style='background:linear-gradient(135deg,#667eea,#764ba2);'>
-        <h2>📤 Upload</h2>
-        <p>Upload manuscript image</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with col2:
-        st.markdown("""
-        <div class='card' style='background:linear-gradient(135deg,#ff9966,#ff5e62);'>
-        <h2>✨ Enhance</h2>
-        <p>Enhance damaged scripts</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with col3:
-        st.markdown("""
-        <div class='card' style='background:linear-gradient(135deg,#36d1dc,#5b86e5);'>
-        <h2>📊 Compare</h2>
-        <p>View enhancement results</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-    if os.path.exists("book.png"):
-        st.image("book.png", use_container_width=True)
-
-    st.markdown("---")
-
-    st.subheader("🚀 How It Works")
-
-    st.write(
-        "Upload → Crop → Enhance → Compare → Download"
-    )
-
-
-# =========================
-# UPLOAD IMAGE
-# =========================
-elif menu == "⬆️ Upload Image":
-
-    st.title("📸 Upload Ancient Script")
-
-    uploaded = st.file_uploader(
-        "Upload Script Image",
-        type=["jpg", "jpeg", "png"]
-    )
-
-    camera_img = st.camera_input("📷 Capture Image")
-
-    if uploaded is not None:
-        image = Image.open(uploaded)
-        st.session_state["image"] = image
-
-    elif camera_img is not None:
-        image = Image.open(camera_img)
-
-        if is_script_image(image):
-            st.success("✅ Script detected")
-            st.session_state["image"] = image
-
-        else:
-            st.error("❌ Only script/manuscript images allowed")
-
-    if "image" in st.session_state:
-        st.image(
-            st.session_state["image"],
-            caption="Uploaded Image",
-            use_container_width=True
-        )
-
-
-# =========================
-# ENHANCE & COMPARE
-# =========================
-elif menu == "✨ Enhance & Compare":
-
-    if "image" not in st.session_state:
-        st.warning("⚠️ Upload image first")
-
-    else:
-        image = st.session_state["image"]
-
-        st.subheader("✂️ Crop Image")
-        cropped = st_cropper(image)
-
-        gray = preprocess(cropped)
-
-        if st.button("🚀 Run All Enhancements"):
-
-            methods = {
-                "CLAHE": clahe,
-                "Denoise": denoise,
-                "Sharpen": sharpen,
-                "Edge": edge_enhance,
-                "Super Resolution": super_resolution,
-                "Deep Learning": deep_enhance
-            }
-
-            outputs = {}
-            results = {}
-
-            for name, func in methods.items():
-                out = func(gray)
-
-                if out.shape != gray.shape:
-                    out = cv2.resize(out, (gray.shape[1], gray.shape[0]))
-
-                outputs[name] = out
-                results[name] = calculate_accuracy(gray, out)
-
-            st.session_state["outputs"] = outputs
-            st.session_state["results"] = results
-
-        if "outputs" in st.session_state:
-
-            outputs = st.session_state["outputs"]
-
-            method = st.selectbox(
-                "🔍 Select Enhancement Method",
-                list(outputs.keys())
-            )
-
-            enhanced_img = outputs[method]
-
-            col1, col2 = st.columns(2)
-
-            with col1:
-                st.image(gray, caption="Original", use_container_width=True)
-
-            with col2:
-                st.image(enhanced_img, caption=method, use_container_width=True)
-
-            st.subheader("🎞️ Before vs After")
-
-            alpha = st.slider("Comparison Slider", 0.0, 1.0, 0.5)
-
-            blend = cv2.addWeighted(
-                gray.astype(np.float32),
-                1 - alpha,
-                enhanced_img.astype(np.float32),
-                alpha,
-                0
-            )
-
-            st.image(blend.astype(np.uint8), use_container_width=True)
-
-            _, buffer = cv2.imencode('.png', enhanced_img)
-
-            st.download_button(
-                label="⬇️ Download Enhanced Image",
-                data=buffer.tobytes(),
-                file_name=f"{method}_enhanced.png",
-                mime="image/png"
-            )
-
-
-# =========================
-# RESULTS DASHBOARD
-# =========================
-elif menu == "📊 Results Dashboard":
-
-    if "results" not in st.session_state:
-        st.warning("⚠️ Run enhancement first")
-
-    else:
-        df = pd.DataFrame(
-            list(st.session_state["results"].items()),
-            columns=["Method", "Accuracy"]
-        )
-
-        df = df.sort_values(by="Accuracy", ascending=False)
-        df.reset_index(drop=True, inplace=True)
-
-        best_method = df.iloc[0]["Method"]
-        best_score = df.iloc[0]["Accuracy"]
-
-        st.success(f"🥇 Best Method: {best_method} ({best_score:.2f}%)")
-
-        fig, ax = plt.subplots(figsize=(8, 5))
-
-        ax.bar(df["Method"], df["Accuracy"])
-
-        ax.set_xlabel("Method")
-        ax.set_ylabel("Accuracy")
-        ax.set_title("Enhancement Accuracy Comparison")
-
-        st.pyplot(fig)
-
-        st.dataframe(df, use_container_width=True)
-
+        # Accuracy ranking
+        if st.session_state["results"]:
+            df = pd.DataFrame(list(st.session_state["results"].items()), columns=["Method", "Accuracy"])
+            df = df.sort_values("Accuracy", ascending=False).reset_index(drop=True)
+            best_method = df.iloc[0]["Method"]
+            best_score = df.iloc[0]["Accuracy"]
+            st.success(f"Best Method: {best_method} ({best_score:.2f}%)")
+
+            fig, ax = plt.subplots(figsize=(8, 5))
+            bars = ax.bar(df["Method"], df["Accuracy"], color='skyblue')
+            ax.set_xlabel("Method")
+            ax.set_ylabel("Accuracy (%)")
+            ax.set_title("Enhancement Accuracy Comparison")
+            ax.set_ylim(0, 105)
+            for bar, val in zip(bars, df["Accuracy"]):
+                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1,
+                        f"{val:.1f}", ha='center', va='bottom', fontsize=10)
+            st.pyplot(fig)
+            st.dataframe(df, use_container_width=True)
+
+        # Side-by-side comparison history
+        if st.session_state["comparison_images"]:
+            st.subheader("Recent Comparisons")
+            for orig, enh, meth in st.session_state["comparison_images"][-5:]:
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.image(cv2.cvtColor(orig, cv2.COLOR_BGR2RGB), caption="Original", width=250)
+                with col_b:
+                    st.image(cv2.cvtColor(enh, cv2.COLOR_BGR2RGB), caption=f"{meth}", width=250)
+
+        # Clear history button
+        if st.button("Clear All History"):
+            st.session_state["results"] = {}
+            st.session_state["comparison_images"] = []
+            st.rerun()
 
 # =========================
 # ABOUT PAGE
 # =========================
-elif menu == "ℹ️ About":
-
-    st.title("📜 Ancient Script Enhancement")
-
+elif menu == "About":
+    st.header("Project Information")
     st.markdown("""
-    ### 👨‍💻 Project Details
+    ### Ancient Script Enhancement Tool
 
-    - **Student Name:** Parvati S Savalagi
-    - **College:** Government First Grade College for Women Jamkhandi
-    - **Course:** BCA
-    - **Year:** 2026
+    **Student Name:** Parvati S Savalagi  
+    **College:** Govt. First Grade College for Women, Jamkhandi  
+    **Department:** Computer Science and Application  
 
-    ---
+    **Features:**
+    - Four enhancement methods (Histogram Equalization, CLAHE, Sharpening, Denoising)
+    - Adjustable parameters for each method
+    - Brightness & Contrast fine-tuning
+    - Histogram visualisation (original vs enhanced)
+    - Accuracy metric based on contrast improvement
+    - Batch processing with ZIP download
+    - Results dashboard with method ranking
+    - Side-by-side comparison history
 
-    ### 🌍 About Project
+    **Technology Stack:**
+    - Streamlit (UI)
+    - OpenCV (image processing)
+    - NumPy, Pandas, Matplotlib
+    - Pillow
 
-    This project enhances ancient handwritten manuscripts using
-    Artificial Intelligence and Image Processing techniques.
-
-    ---
-
-    ### ⚙️ Technologies Used
-
-    - Streamlit
-    - OpenCV
-    - PyTorch
-    - NumPy
-    - Pandas
-    - Matplotlib
-
-    ---
-
-    ### 🚀 Features
-
-    - Ancient manuscript enhancement
-    - Deep learning enhancement
-    - Super resolution
-    - Accuracy comparison dashboard
-    - Download enhanced image
-
-    ---
-
-    ### 🔮 Future Scope
-
-    - OCR Integration
-    - Multi-language support
-    - Cloud deployment
-    - Real-time enhancement
+    **Note:** All processing is done locally in your browser session. No images are stored on the server.
     """)
-```
-
----
-
-# requirements.txt
-
-```text
-streamlit
-opencv-python
-opencv-contrib-python
-numpy
-pillow
-torch
-torchvision
-pandas
-matplotlib
-streamlit-cropper
-```
-
----
-
-# .streamlit/config.toml
-
-```toml
-[theme]
-primaryColor="#1E3C72"
-backgroundColor="#FFFFFF"
-secondaryBackgroundColor="#F0F2F6"
-textColor="#000000"
-font="sans serif"
-```
-
----
-
-# ▶️ Run Streamlit App
-
-Open terminal and run:
-
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
-
----
-
-# ☁️ Deploy on Streamlit Cloud
-
-1. Upload project to GitHub
-2. Open Streamlit Cloud
-3. Connect GitHub repository
-4. Select `app.py`
-5. Click Deploy
-
----
-
-# ✅ Improvements Done
-
-* Fixed `_init_` errors → changed to `__init__`
-* Fixed model loading issues
-* Added proper Streamlit structure
-* Added responsive UI
-* Added download functionality
-* Added enhancement comparison dashboard
-* Added cropper support
-* Added camera support
-* Added manuscript validation
