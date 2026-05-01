@@ -40,6 +40,31 @@ def apply_denoise(img, h, template_window, search_window):
     """Non-local means denoising"""
     return cv2.fastNlMeansDenoisingColored(img, None, h, h, template_window, search_window)
 
+def apply_binarization(img, method_type, threshold_val=127, block_size=11, constant=2, adaptive_method='gaussian'):
+    """
+    Convert image to binary (black and white).
+    method_type: 'simple', 'otsu', 'adaptive'
+    """
+    # Convert to grayscale if needed
+    if len(img.shape) == 3:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = img
+    
+    if method_type == 'simple':
+        _, binary = cv2.threshold(gray, threshold_val, 255, cv2.THRESH_BINARY)
+    elif method_type == 'otsu':
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    else:  # adaptive
+        if adaptive_method == 'gaussian':
+            adaptive_type = cv2.ADAPTIVE_THRESH_GAUSSIAN_C
+        else:
+            adaptive_type = cv2.ADAPTIVE_THRESH_MEAN_C
+        binary = cv2.adaptiveThreshold(gray, 255, adaptive_type, cv2.THRESH_BINARY, block_size, constant)
+    
+    # Convert back to 3-channel BGR for consistency
+    return cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+
 def adjust_brightness_contrast(img, alpha, beta):
     """alpha = contrast, beta = brightness"""
     return cv2.convertScaleAbs(img, alpha=alpha, beta=beta)
@@ -124,7 +149,7 @@ if menu == "Enhancement":
         with col2:
             st.subheader("Enhancement Settings")
             method = st.selectbox("Method", 
-                                  ["Histogram Equalization", "CLAHE", "Sharpening", "Denoising"])
+                                  ["Histogram Equalization", "CLAHE", "Sharpening", "Denoising", "Binarization"])
 
             # Method-specific parameters
             if method == "CLAHE":
@@ -136,8 +161,21 @@ if menu == "Enhancement":
                 h = st.slider("Denoising strength (h)", 3, 15, 10, 1)
                 template_window = st.slider("Template window size", 5, 15, 7, 2)
                 search_window = st.slider("Search window size", 11, 25, 21, 2)
+            elif method == "Binarization":
+                binary_type = st.selectbox("Threshold type", ["Simple", "Otsu", "Adaptive"])
+                if binary_type == "Simple":
+                    threshold_val = st.slider("Threshold value", 0, 255, 127, 1)
+                elif binary_type == "Adaptive":
+                    adaptive_method = st.selectbox("Adaptive method", ["Gaussian", "Mean"])
+                    block_size = st.slider("Block size (odd)", 3, 31, 11, 2)
+                    # ensure block_size is odd
+                    if block_size % 2 == 0:
+                        block_size += 1
+                    constant = st.slider("Constant C", 0, 20, 2, 1)
+                # For Otsu, no extra params
+                threshold_val_local = threshold_val if binary_type == "Simple" else 0
 
-            # Brightness / Contrast
+            # Brightness / Contrast (only for non-binarization methods? but can apply after)
             contrast_val = st.slider("Contrast", 0.5, 2.0, 1.0, 0.01)
             brightness_val = st.slider("Brightness", -50, 50, 0, 1)
 
@@ -153,10 +191,20 @@ if menu == "Enhancement":
                             enhanced = apply_sharpen(original, strength)
                         elif method == "Denoising":
                             enhanced = apply_denoise(original, h, template_window, search_window)
+                        elif method == "Binarization":
+                            if binary_type == "Simple":
+                                enhanced = apply_binarization(original, 'simple', threshold_val=threshold_val)
+                            elif binary_type == "Otsu":
+                                enhanced = apply_binarization(original, 'otsu')
+                            else:  # Adaptive
+                                enhanced = apply_binarization(original, 'adaptive', 
+                                                              block_size=block_size, 
+                                                              constant=constant,
+                                                              adaptive_method=adaptive_method.lower())
                         else:
                             enhanced = original.copy()
 
-                        # Fine-tuning
+                        # Fine-tuning (skip for binarization? but can still adjust contrast/brightness on binary image)
                         enhanced = adjust_brightness_contrast(enhanced, contrast_val, brightness_val)
 
                         # Compute accuracy
@@ -190,13 +238,16 @@ if menu == "Enhancement":
                     except Exception as e:
                         st.error(f"Enhancement failed: {str(e)}")
 
-    # Batch processing (optional)
+    # Batch processing (with binarization)
     with st.expander("Batch Processing (multiple images)"):
         batch_files = st.file_uploader("Upload several images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
         if batch_files:
             batch_method = st.selectbox("Method for batch", 
-                                        ["Histogram Equalization", "CLAHE", "Sharpening", "Denoising"],
+                                        ["Histogram Equalization", "CLAHE", "Sharpening", "Denoising", "Binarization"],
                                         key="batch_method")
+            if batch_method == "Binarization":
+                batch_binary_type = st.selectbox("Threshold type (batch)", ["Simple", "Otsu", "Adaptive"], key="batch_binary")
+                # Simplifying: use fixed parameters for batch (to avoid too many sliders)
             if st.button("Process Batch"):
                 zip_buffer = io.BytesIO()
                 with zipfile.ZipFile(zip_buffer, "w") as zf:
@@ -205,14 +256,24 @@ if menu == "Enhancement":
                         img = cv2.imdecode(bytes_data, cv2.IMREAD_COLOR)
                         if img is None:
                             continue
+                        # Apply selected method with default parameters
                         if batch_method == "Histogram Equalization":
                             enh = apply_hist_eq(img)
                         elif batch_method == "CLAHE":
                             enh = apply_clahe(img, 2.0, 8)
                         elif batch_method == "Sharpening":
                             enh = apply_sharpen(img, 1.0)
-                        else:
+                        elif batch_method == "Denoising":
                             enh = apply_denoise(img, 10, 7, 21)
+                        elif batch_method == "Binarization":
+                            if batch_binary_type == "Simple":
+                                enh = apply_binarization(img, 'simple', threshold_val=127)
+                            elif batch_binary_type == "Otsu":
+                                enh = apply_binarization(img, 'otsu')
+                            else:
+                                enh = apply_binarization(img, 'adaptive', block_size=11, constant=2, adaptive_method='gaussian')
+                        else:
+                            enh = img
                         _, buf = cv2.imencode('.png', enh)
                         zf.writestr(f"enhanced_{idx}.png", buf.tobytes())
                 st.download_button("Download All as ZIP", data=zip_buffer.getvalue(),
@@ -277,7 +338,8 @@ elif menu == "About":
     **Department:** Computer Science and Application  
 
     **Features:**
-    - Four enhancement methods (Histogram Equalization, CLAHE, Sharpening, Denoising)
+    - Five enhancement methods: Histogram Equalization, CLAHE, Sharpening, Denoising, **Binarization**
+    - Binarization options: Simple threshold, Otsu's method, Adaptive threshold
     - Adjustable parameters for each method
     - Brightness & Contrast fine-tuning
     - Histogram visualisation (original vs enhanced)
@@ -286,11 +348,5 @@ elif menu == "About":
     - Results dashboard with method ranking
     - Side-by-side comparison history
 
-    **Technology Stack:**
-    - Streamlit (UI)
-    - OpenCV (image processing)
-    - NumPy, Pandas, Matplotlib
-    - Pillow
-
-    **Note:** All processing is done locally in your browser session. No images are stored on the server.
+    **Technology Stack:** Streamlit, OpenCV, NumPy, Pandas, Matplotlib, Pillow
     """)
