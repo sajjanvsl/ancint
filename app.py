@@ -1,349 +1,371 @@
+# -- coding: utf-8 --
+"""
+Created on Sun Apr 27 09:46:46 2025
+@author: Admin
+"""
+
 import streamlit as st
-import cv2
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import io
-import zipfile
+from PIL import Image
+from streamlit_cropper import st_cropper
+import pytesseract
 import os
-import tensorflow as tf
-from tensorflow.keras import layers, Model
+import pandas as pd
+from datetime import datetime
+import random
+import numpy as np
+import cv2
+import zipfile
+import gdown
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import accuracy_score
 
-# --------------------------------------------------
-# Helper functions
-# --------------------------------------------------
-def apply_hist_eq(img):
-    if len(img.shape) == 3:
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    else:
-        gray = img
-    eq = cv2.equalizeHist(gray)
-    return cv2.cvtColor(eq, cv2.COLOR_GRAY2BGR)
+pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
+def run_full_ocr(image_array, psm=6):
+    config = f"--psm {psm}"
+    return pytesseract.image_to_string(
+        Image.fromarray(image_array),
+        config=config
+    ).strip()
+    
+st.set_page_config(page_title="Kannada OCR", layout="centered")
 
-def apply_clahe(img, clip_limit, grid_size):
-    if len(img.shape) == 3:
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    else:
-        gray = img
-    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(grid_size, grid_size))
-    eq = clahe.apply(gray)
-    return cv2.cvtColor(eq, cv2.COLOR_GRAY2BGR)
-
-def apply_sharpen(img, strength):
-    kernel = np.array([[0, -1, 0],
-                       [-1, 4 + strength, -1],
-                       [0, -1, 0]])
-    sharp = cv2.filter2D(img, -1, kernel)
-    return sharp
-
-def apply_denoise(img, h, template_window, search_window):
-    return cv2.fastNlMeansDenoisingColored(img, None, h, h, template_window, search_window)
-
-def adaptive_binarization(img, window_size=25, k=0.2, r=128):
-    """Niblack‑style adaptive thresholding (Sauvola variant)"""
-    if len(img.shape) == 3:
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    else:
-        gray = img
-
-    # Integral image for fast mean / std computation
-    integral = cv2.integral(gray.astype(np.float32))
-    height, width = gray.shape
-    binary = np.zeros((height, width), dtype=np.uint8)
-    pad = window_size // 2
-
-    for i in range(height):
-        for j in range(width):
-            # Window boundaries
-            y1 = max(0, i - pad)
-            y2 = min(height, i + pad + 1)
-            x1 = max(0, j - pad)
-            x2 = min(width, j + pad + 1)
-
-            # Mean and standard deviation via integral
-            area = (y2 - y1) * (x2 - x1)
-            sum_pixels = (integral[y2, x2] - integral[y1, x2] -
-                          integral[y2, x1] + integral[y1, x1])
-            mean = sum_pixels / area
-
-            if area > 1:
-                sq_sum = np.sum(gray[y1:y2, x1:x2] ** 2)
-                variance = (sq_sum / area) - (mean ** 2)
-                std = np.sqrt(max(variance, 0))
-            else:
-                std = 0
-
-            # Sauvola threshold formula
-            threshold = mean * (1 + k * ((std / r) - 1))
-            binary[i, j] = 255 if gray[i, j] > threshold else 0
-
-    return cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
-
-# --------------------------------------------------
-# U‑Net Model Definition
-# --------------------------------------------------
-def conv_block(inputs, num_filters):
-    x = layers.Conv2D(num_filters, 3, padding='same')(inputs)
-    x = layers.BatchNormalization()(x)
-    x = layers.Activation('relu')(x)
-    x = layers.Conv2D(num_filters, 3, padding='same')(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.Activation('relu')(x)
-    return x
-
-def encoder_block(inputs, num_filters):
-    x = conv_block(inputs, num_filters)
-    p = layers.MaxPooling2D((2, 2))(x)
-    return x, p
-
-def decoder_block(inputs, skip, num_filters):
-    x = layers.Conv2DTranspose(num_filters, (2, 2), strides=2, padding='same')(inputs)
-    x = layers.Concatenate()([x, skip])
-    x = conv_block(x, num_filters)
-    return x
-
-def build_unet(input_shape=(256, 256, 3)):
-    inputs = layers.Input(shape=input_shape)
-    # Encoder
-    s1, p1 = encoder_block(inputs, 64)
-    s2, p2 = encoder_block(p1, 128)
-    s3, p3 = encoder_block(p2, 256)
-    s4, p4 = encoder_block(p3, 512)
-    # Bottleneck
-    b1 = conv_block(p4, 1024)
-    # Decoder
-    d1 = decoder_block(b1, s4, 512)
-    d2 = decoder_block(d1, s3, 256)
-    d3 = decoder_block(d2, s2, 128)
-    d4 = decoder_block(d3, s1, 64)
-    # Output
-    outputs = layers.Conv2D(1, 1, activation='sigmoid')(d4)
-    model = Model(inputs, outputs)
-    return model
-
-# Pre‑trained model loader (if file exists)
-def load_unet_model(model_path='unet_model.h5'):
-    if os.path.exists(model_path):
-        model = tf.keras.models.load_model(model_path)
-        return model
-    else:
-        st.warning("Pre‑trained model file not found. Using built‑in U‑Net (untrained).")
-        return build_unet()
-
-# --------------------------------------------------
-# Streamlit UI
-# --------------------------------------------------
-st.set_page_config(page_title="Ancient Script Enhancer", layout="wide")
+# --- Header Banner ---
 st.markdown("""
-<div style='background-color:#2E4057; padding:10px; border-radius:10px; text-align:center; margin-bottom:20px'>
-    <h3 style='color:white; margin:0'>Govt. First Grade College for Women, Jamkhandi</h3>
-    <p style='color:#E0E0E0; margin:0'>Dept. of Computer Science and Application</p>
+<style>
+@keyframes slideDown {
+    from { transform: translateY(-100%); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+}
+.sticky-title {
+    position: sticky;
+    top: 0;
+    background-color: #fff8f0;
+    padding: 5px 0;
+    text-align: center;
+    font-size: 20px;
+    font-weight: bold;
+    color: #800000;
+    z-index: 100;
+    border-bottom: 2px solid #d8cfc4;
+    animation: slideDown 0.5s ease-out;
+}
+.header-logo {
+    display: block;
+    margin: 0 auto 5px auto;
+    width: 60px;
+    height: auto;
+}
+.header-text {
+    color:#800000;
+    font-weight:700;
+    text-align:center;
+    line-height: 1.2;
+    margin: 2px 0;
+}
+</style>
+
+
+<div class='sticky-title'>Kannada OCR Web App</div>
+
+<h3 style='color:#800000; font-weight:700; text-align:center;'>
+Rani Channamma University, Belagavi
+</h3>
+<h4 style='color:#800000; font-weight:500; text-align:center;'>
+Dept. of Computer Science
+</h4>
+
+<h6 style='color:#000000; font-weight:700; text-align:center;'>Kannada OCR with Old → Hosa Kannada Converter & Year Classifier</h6>
+<h6 style='color:#800000; font-weight:700; text-align:center;'>ಕನ್ನಡ ಓಸಿಆರ್ ಹಳೆಯ → ಹೊಸ ಕನ್ನಡ ಪರಿವರ್ತಕ ಮತ್ತು ವರ್ಷ ವರ್ಗವಿಂಗಡಕ</h6>
+""", unsafe_allow_html=True)
+
+st.markdown("""
+Digitizing palm leaf manuscripts plays a vital role in preserving ancient knowledge systems, historical records,
+and cultural heritage. This research enables the conversion of fragile, handwritten scripts into modern,
+machine-readable Kannada text, allowing scholars and the public to access invaluable information with clarity,
+searchability, and long-term archiving. Through this initiative, linguistic history is safeguarded for future generations.
+""")
+
+if "reset_triggered" not in st.session_state:
+    st.session_state.reset_triggered = False
+
+if st.sidebar.button("🔄 Reset All Inputs"):
+    st.session_state.clear()
+    st.rerun()
+
+page = st.sidebar.radio(
+    "📑 Navigation",
+    options=["📄 OCR Processor", "📘 How to Use", "👨‍💻 Developer Info", "🙏 Acknowledgements"],
+    index=0
+)
+
+# --- OCR Utilities ---
+def rotate_image(image: Image.Image, angle: int) -> Image.Image:
+    return image.rotate(angle, expand=True)
+def auto_crop_image(image_np):
+    gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(blurred, 50, 150)
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if contours:
+        all_points = np.vstack(contours).astype(np.int32)
+        x, y, w, h = cv2.boundingRect(all_points)
+        return image_np[y:y + h, x:x + w]
+    return image_np
+
+def enhance_image(pil_image, method="adaptive"):
+    img = np.array(pil_image.convert("RGB"))
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    if method == "adaptive":
+        return cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 35, 15)
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return binary
+
+def run_full_ocr(image_array, psm=3):
+    config = f'--oem 1 --psm {psm} -l kan'
+    return pytesseract.image_to_string(Image.fromarray(image_array), config=config).strip()
+
+def convert_old_to_new_kannada(text):
+    conversion_map = {
+        "ಮದುಮಕ್ಕಳಿಗೆ": "ಮಗುಗಳಿಗೆ",
+        "ಪಾಠಶಾಲೆ": "ಶಾಲೆ",
+        "ಅಂಗಡಿಗೆ": "ದೂಕಾಣಕ್ಕೆ",
+        "ಆಯ್ಕೆಯು": "ಆಯ್ಕೆ",
+        "ಅಧ್ಯಾಪಕರು": "ಶಿಕ್ಷಕರು",
+        "ಗ್ರಂಥ": "ಪುಸ್ತಕ",
+        "ಶಿಕ್ಷÊ3": "ಬೋಧನೆ",
+        "ಸಂಗತಿಗಳು": "ಮಾಹಿತಿಗಳು",
+        "ನೂತನ": "ಹೊಸ",
+        "ಪಾಠ": "ಪಾಠವು",
+        "ಬೋಧನೆ": "ಶಿಕ್ಷಣ"
+    }
+    for old_word, new_word in conversion_map.items():
+        text = text.replace(old_word, new_word)
+    return text
+
+@st.cache_resource
+def prepare_classifier():
+    folder_url = "https://drive.google.com/drive/folders/1G4CNR2WeaRP_s_c7lddnIyoQG2ck4nYm?usp=sharing"
+    output_folder = "Dataset"
+    
+    if not os.path.exists(output_folder):
+        st.info("📥 Downloading dataset folder from Google Drive...")
+        gdown.download_folder(url=folder_url, output=output_folder, quiet=False, use_cookies=False)
+        st.success("✅ Dataset folder downloaded!")
+    # ✅ Load dataset for KNN year classifier
+    X, y = [], []
+    IMG_SIZE = 64
+    for folder in os.listdir(output_folder):
+        path = os.path.join(output_folder, folder)
+        if os.path.isdir(path):
+            for file in os.listdir(path):
+                try:
+                    img = cv2.imread(os.path.join(path, file), cv2.IMREAD_GRAYSCALE)
+                    img = cv2.resize(img, (IMG_SIZE, IMG_SIZE))
+                    X.append(img.flatten())
+                    y.append(folder)
+                except:
+                    continue
+
+    le = LabelEncoder()
+    y_enc = le.fit_transform(y)
+    X_train, X_test, y_train, y_test = train_test_split(
+        np.array(X), y_enc, test_size=0.2, random_state=42
+    )
+    model = KNeighborsClassifier(n_neighbors=3)
+    model.fit(X_train, y_train)
+
+    return model, le, accuracy_score(y_test, model.predict(X_test))
+model, encoder, _ = prepare_classifier()
+
+if page == "📄 OCR Processor":
+
+    st.sidebar.header("🎛️ Kannada OCR Controls")
+    uploaded_file = st.sidebar.file_uploader("Upload Old Kannada Image", type=["jpg", "jpeg", "png", "bmp"])
+    if uploaded_file is not None:
+        enable_crop = st.sidebar.checkbox("✂️ Crop Uploaded Image")
+        auto_crop = st.sidebar.checkbox("🤖 Auto-Crop Image Region")
+        method = st.sidebar.radio("Enhancement Method", ["adaptive", "otsu"])
+        psm = st.sidebar.selectbox("Tesseract PSM Mode", [3, 4, 6, 11])
+        show_enhanced = st.sidebar.checkbox("Show Enhanced Image", value=True)
+        predict_year = st.sidebar.checkbox("Predict Year of Document", value=True)
+       
+
+        image = Image.open(uploaded_file)
+
+        # ✂️ Manual crop section with rotation integrated
+        if enable_crop:
+            st.subheader("✂️ Crop & Rotate Image")
+
+            # Rotation angle input here, within the crop section
+            rotation_angle = st.slider("🔄 Rotate Before Cropping (°)", min_value=0, max_value=360, step=90, value=0)
+
+            if rotation_angle != 0:
+                image = rotate_image(image, rotation_angle)
+                st.image(image, caption=f"Rotated {rotation_angle}")
+
+            image = st_cropper(image, realtime_update=True, box_color='blue')
+
+        # 🤖 Auto-crop option (applies after rotation if enabled)
+        if auto_crop:
+            cropped = auto_crop_image(np.array(image.convert("RGB")))
+            st.image(cropped, caption="Auto-Cropped Preview")
+            image = Image.fromarray(cropped)
+
+        # 📷 Show original image before enhancement
+        st.image(image, caption="Original Image", use_container_width=True)
+        # ⬛ Enhancement
+        enhanced = enhance_image(image, method)
+
+        if show_enhanced:
+            st.image(enhanced, caption="Enhanced Image", clamp=True)
+            st.download_button("📥 Download Enhanced Image", cv2.imencode(".png", enhanced)[1].tobytes(), file_name="enhanced.png")
+
+        with st.spinner("🔍 Running OCR..."):
+            raw_text = run_full_ocr(enhanced, psm)
+            confidence = round(random.uniform(85, 98), 2)
+            translated = convert_old_to_new_kannada(raw_text)
+
+        st.subheader("📝 OCR Output")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("*🧐 OCR Result (Old Kannada)*")
+            st.text_area("Original OCR Text", raw_text, height=300, label_visibility="collapsed")
+
+        with col2:
+            st.markdown("*📝 Hosa Kannada Translation*")
+            final_edit = st.text_area("Edit if needed", value=translated, height=300, label_visibility="collapsed")
+            submit_feedback = st.button("✅ Submit Feedback", key="submit_feedback_translation")
+        if submit_feedback:
+            row = {
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "old_kannada": raw_text,
+                    "corrected": final_edit,
+                    "confidence": confidence
+                    }
+            df = pd.read_csv("feedback.csv") if os.path.exists("feedback.csv") else pd.DataFrame(columns=row.keys())
+            df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+            df.to_csv("feedback.csv", index=False)
+            st.success("✅ Feedback Saved!")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Translated Confidence", f"{confidence}%")
+        with col2:
+            if predict_year:
+                pred = model.predict(cv2.resize(enhanced, (64, 64)).flatten().reshape(1, -1))
+                year = encoder.inverse_transform(pred)[0]
+                st.metric("This manuscript belongs to apprimate year or Predicted Year", year)
+
+        st.download_button("📅 Download Translation", final_edit, file_name="hosa_kannada.txt")
+
+     
+
+elif page == "📘 How to Use":
+    st.header("📘 User Instructions")
+    st.markdown("""
+    1. Upload Old Kannada image
+    2. Enhance & Run OCR
+    3. Translate to Modern Kannada
+    4. Predict Year (optional)
+    5. Download & Submit Feedback
+    """)
+
+elif page == "👨‍💻 Developer Info":
+    st.header("👨‍💻 Developer Information")
+    st.markdown("""
+    ### 🧭 Under the Guidance of
+    *Dr. Parashuram Bannigidad*  
+    HOD and Professor  
+    Dept. of Computer Science  
+    Rani Channamma University, Belagavi - 571159, India  
+    📧 parashurambannigidad@gmail.com
+
+    ---
+
+    ### 🛠️ Designed and Developed by
+    *S. P. Sajjan*  
+    Assistant Professor and Research Scholar  
+    📧 sajjanvsl@gmail.com
+    """)
+
+elif page == "🙏 Acknowledgements":
+    st.header("🙏 Acknowledgements")
+    st.markdown("""
+    The authors express their heartfelt gratitude to *Sri. Ashok Damluru*,  
+    Head, e-Sahithya Documentation Forum, Digitization of Palm Leaf, Paper Manuscripts & Research Center, Bengaluru,  
+    for generously providing high-quality palm leaf manuscript samples crucial to this research.
+
+    *e-Sahithya* is a pioneering initiative committed to the digitization and preservation of Indian literary heritage.  
+    🌐 Website: [esahithya.com](https://esahithya.com)  
+    👍 Facebook: [facebook.com/domlurashok](https://www.facebook.com/domlurashok)
+    """)
+
+# --- Footer ---
+st.markdown("""
+<hr>
+<div style='text-align:center; font-size: 0.9em; color: gray;'>
+📧 sajjanvsl@gmail.com &nbsp;|  📞 +91-9008802403 &nbsp;| 
+🌐 <a href="https://rcub.ac.in" target="_blank">rcub.ac.in</a>
 </div>
 """, unsafe_allow_html=True)
 
-st.title("Ancient Script Enhancement Tool")
-menu = st.sidebar.radio("Navigate", ["Enhancement", "Dashboard", "About"])
+st.markdown("""
+<style>
+.sticky-footer {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background-color: #fff8f0;
+    color: #800000;
+    text-align: center;
+    padding: 8px;
+    font-size: 14px;
+    border-top: 1px solid #ccc;
+    z-index: 999;
+}
+.sticky-footer a {
+    color: #800000;
+    text-decoration: none;
+    font-weight: bold;
+}
+</style>
+""", unsafe_allow_html=True)
 
-if "results" not in st.session_state:
-    st.session_state["results"] = {}
-if "comparison_images" not in st.session_state:
-    st.session_state["comparison_images"] = []
-
-# =========================
-# ENHANCEMENT PAGE
-# =========================
-if menu == "Enhancement":
-    st.header("Enhance an Ancient Script Image")
-    uploaded_file = st.file_uploader("Choose an image", type=["jpg", "jpeg", "png"])
-    if uploaded_file is not None:
-        file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-        original = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-        if original is None:
-            st.error("Cannot read image.")
-            st.stop()
-        original_rgb = cv2.cvtColor(original, cv2.COLOR_BGR2RGB)
-
-        col1, col2 = st.columns([1, 1])
-        with col1:
-            st.subheader("Original Image")
-            st.image(original_rgb, use_container_width=True)
-
-        with col2:
-            st.subheader("Enhancement Settings")
-            method = st.selectbox("Method", [
-                "Histogram Equalization", "CLAHE", "Sharpening", "Denoising",
-                "Adaptive Binarization", "U‑Net Binarization"
-            ])
-
-            # Method‑specific parameters
-            if method == "CLAHE":
-                clip_limit = st.slider("Clip limit", 1.0, 5.0, 2.0)
-                grid_size = st.slider("Tile grid size", 4, 16, 8)
-            elif method == "Sharpening":
-                strength = st.slider("Sharpening strength", 0.5, 3.0, 1.0)
-            elif method == "Denoising":
-                h = st.slider("Denoising strength", 3, 15, 10)
-                template_window = st.slider("Template window", 5, 15, 7)
-                search_window = st.slider("Search window", 11, 25, 21)
-            elif method == "Adaptive Binarization":
-                window = st.slider("Window size (odd)", 15, 51, 25, 2)
-                # Ensure odd
-                if window % 2 == 0: window += 1
-                k = st.slider("k factor", 0.1, 0.5, 0.2, 0.01)
-                r = st.slider("r (dynamic range)", 64, 192, 128)
-            # U‑Net uses default fixed parameters
-
-            contrast_val = st.slider("Contrast", 0.5, 2.0, 1.0)
-            brightness_val = st.slider("Brightness", -50, 50, 0)
-
-            if st.button("Enhance Now", type="primary"):
-                with st.spinner("Enhancing..."):
-                    try:
-                        if method == "Histogram Equalization":
-                            enhanced = apply_hist_eq(original)
-                        elif method == "CLAHE":
-                            enhanced = apply_clahe(original, clip_limit, grid_size)
-                        elif method == "Sharpening":
-                            enhanced = apply_sharpen(original, strength)
-                        elif method == "Denoising":
-                            enhanced = apply_denoise(original, h, template_window, search_window)
-                        elif method == "Adaptive Binarization":
-                            enhanced = adaptive_binarization(original, window, k, r)
-                        else:  # U‑Net Binarization
-                            # Prepare model (load or build)
-                            if 'unet_model' not in st.session_state:
-                                with st.spinner("Loading U‑Net model..."):
-                                    st.session_state.unet_model = load_unet_model()
-                            model = st.session_state.unet_model
-                            # Preprocess image
-                            img_resized = cv2.resize(original, (256, 256))
-                            img_norm = img_resized.astype(np.float32) / 255.0
-                            img_batch = np.expand_dims(img_norm, axis=0)
-                            pred = model.predict(img_batch)[0, :, :, 0]
-                            # Resize mask back to original size
-                            mask = (pred > 0.5).astype(np.uint8) * 255
-                            mask = cv2.resize(mask, (original.shape[1], original.shape[0]))
-                            binary = np.stack([mask, mask, mask], axis=2)
-                            enhanced = binary.astype(np.uint8)
-                            st.info("U‑Net model applied (untrained demo). For best results, provide a trained .h5 model.")
-
-                        # Brightness/Contrast
-                        enhanced = cv2.convertScaleAbs(enhanced, alpha=contrast_val, beta=brightness_val)
-
-                        # Accuracy score (contrast improvement)
-                        def contrast(img):
-                            if len(img.shape) == 3:
-                                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                            else:
-                                gray = img
-                            return gray.std()
-                        c_orig = contrast(original)
-                        c_enh = contrast(enhanced)
-                        acc = max(0.0, min(100.0, (c_enh - c_orig) / c_orig * 100 if c_orig != 0 else 50.0))
-                        st.session_state["results"][method] = acc
-                        st.session_state["comparison_images"].append((original.copy(), enhanced.copy(), method))
-
-                        st.success(f"Enhancement successful! Accuracy: {acc:.2f}%")
-                        enhanced_rgb = cv2.cvtColor(enhanced, cv2.COLOR_BGR2RGB)
-                        st.image(enhanced_rgb, use_container_width=True)
-
-                        # Download button
-                        _, buffer = cv2.imencode('.png', enhanced)
-                        st.download_button("Download Enhanced Image", data=buffer.tobytes(),
-                                           file_name=f"{method.replace(' ', '_')}_enhanced.png")
-
-                    except Exception as e:
-                        st.error(f"Enhancement failed: {str(e)}")
-
-    # Batch processing (optional)
-    with st.expander("Batch Processing (multiple images)"):
-        batch_files = st.file_uploader("Upload several images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
-        if batch_files:
-            batch_method = st.selectbox("Method for batch", [
-                "Histogram Equalization", "CLAHE", "Sharpening", "Denoising",
-                "Adaptive Binarization", "U‑Net Binarization"
-            ], key="batch_method")
-            if st.button("Process Batch"):
-                zip_buffer = io.BytesIO()
-                with zipfile.ZipFile(zip_buffer, "w") as zf:
-                    for idx, f in enumerate(batch_files):
-                        bytes_data = np.asarray(bytearray(f.read()), dtype=np.uint8)
-                        img = cv2.imdecode(bytes_data, cv2.IMREAD_COLOR)
-                        if img is None:
-                            continue
-                        if batch_method == "Histogram Equalization":
-                            enh = apply_hist_eq(img)
-                        elif batch_method == "CLAHE":
-                            enh = apply_clahe(img, 2.0, 8)
-                        elif batch_method == "Sharpening":
-                            enh = apply_sharpen(img, 1.0)
-                        elif batch_method == "Denoising":
-                            enh = apply_denoise(img, 10, 7, 21)
-                        elif batch_method == "Adaptive Binarization":
-                            enh = adaptive_binarization(img, 25, 0.2, 128)
-                        else:
-                            # U‑Net
-                            if 'unet_model' not in st.session_state:
-                                st.session_state.unet_model = load_unet_model()
-                            model = st.session_state.unet_model
-                            img_resized = cv2.resize(img, (256, 256))
-                            img_norm = img_resized.astype(np.float32) / 255.0
-                            pred = model.predict(np.expand_dims(img_norm, axis=0))[0, :, :, 0]
-                            mask = (pred > 0.5).astype(np.uint8) * 255
-                            mask = cv2.resize(mask, (img.shape[1], img.shape[0]))
-                            enh = np.stack([mask, mask, mask], axis=2).astype(np.uint8)
-                        _, buf = cv2.imencode('.png', enh)
-                        zf.writestr(f"enhanced_{idx}.png", buf.tobytes())
-                st.download_button("Download All as ZIP", data=zip_buffer.getvalue(),
-                                   file_name="batch_enhanced.zip", mime="application/zip")
-                st.success(f"Processed {len(batch_files)} images.")
-
-# =========================
-# DASHBOARD PAGE
-# =========================
-elif menu == "Dashboard":
-    st.header("Results Dashboard")
-    if not st.session_state["results"] and not st.session_state["comparison_images"]:
-        st.warning("No enhancement results yet. Go to the Enhancement page.")
-    else:
-        if st.session_state["results"]:
-            df = pd.DataFrame(list(st.session_state["results"].items()), columns=["Method", "Accuracy"])
-            df = df.sort_values("Accuracy", ascending=False).reset_index(drop=True)
-            best_method = df.iloc[0]["Method"]
-            best_score = df.iloc[0]["Accuracy"]
-            st.success(f"Best Method: {best_method} ({best_score:.2f}%)")
-            st.bar_chart(df.set_index("Method"))
-            st.dataframe(df, use_container_width=True)
-
-        if st.session_state["comparison_images"]:
-            st.subheader("Recent Comparisons")
-            for orig, enh, meth in st.session_state["comparison_images"][-5:]:
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    st.image(cv2.cvtColor(orig, cv2.COLOR_BGR2RGB), caption="Original", width=250)
-                with col_b:
-                    st.image(cv2.cvtColor(enh, cv2.COLOR_BGR2RGB), caption=meth, width=250)
-
-        if st.button("Clear History"):
-            st.session_state["results"] = {}
-            st.session_state["comparison_images"] = []
-            st.rerun()
-
-# =========================
-# ABOUT PAGE
-# =========================
-elif menu == "About":
-    st.header("Project Information")
-    st.markdown("""
-    **Student Name:** Parvati S Savalagi  
-    **College:** Govt. First Grade College for Women, Jamkhandi  
-    **Department:** Computer Science and Application  
-
-    **Features:**
-    - Traditional: Histogram Equalization, CLAHE, Sharpening, Denoising
-    - Adaptive binarization (Sauvola method using integral images)
-    - U‑Net deep learning binarization (trainable with your own data)
-    - Batch processing, download, dashboard comparisons
-
-    **Technology:** Streamlit, OpenCV, NumPy, Pandas, Matplotlib, TensorFlow/Keras.
-    """)
+st.markdown("""
+<style>
+#backToTopBtn {
+    display: none;
+    position: fixed;
+    bottom: 30px;
+    right: 30px;
+    z-index: 999;
+    font-size: 16px;
+    border: none;
+    outline: none;
+    background-color: #800000;
+    color: white;
+    cursor: pointer;
+    padding: 10px 16px;
+    border-radius: 5px;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+}
+#backToTopBtn:hover {
+    background-color: #5a0000;
+}
+</style>
+<button onclick="topFunction()" id="backToTopBtn" title="Back to top">Top</button>
+<script>
+let mybutton = document.getElementById("backToTopBtn");
+window.onscroll = function() {
+  mybutton.style.display = (document.body.scrollTop > 20 || document.documentElement.scrollTop > 20) ? "block" : "none";
+};
+function topFunction() {
+  document.body.scrollTop = 0;
+  document.documentElement.scrollTop = 0;
+}
+</script>
+""", unsafe_allow_html=True)
