@@ -1,8 +1,8 @@
+opencv-python-headless
 streamlit
 streamlit-cropper
 pytesseract
 pillow
-opencv-python-headless
 numpy
 pandas
 scikit-learn
