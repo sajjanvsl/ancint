@@ -1,44 +1,5 @@
-# -*- coding: utf-8 -*-
-"""
-Kannada OCR Web App – Streamlit Cloud Ready
-"""
 
-import streamlit as st
-from PIL import Image
-from streamlit_cropper import st_cropper
-import pytesseract
-import os
-import pandas as pd
-from datetime import datetime
-import random
-import numpy as np
-import cv2
-import gdown
-from gdown.exceptions import FileURLRetrievalError
-from sklearn.neighbors import KNeighborsClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import accuracy_score
-import shutil
-
-# ------------------------------
-# TESSERACT AUTO-CONFIGURATION
-# ------------------------------
-tesseract_path = shutil.which("tesseract")
-if tesseract_path is None:
-    possible_paths = ["/usr/bin/tesseract", "/app/.apt/usr/bin/tesseract"]
-    for p in possible_paths:
-        if os.path.exists(p):
-            tesseract_path = p
-            break
-
-if tesseract_path:
-    pytesseract.pytesseract.tesseract_cmd = tesseract_path
-else:
-    st.error("""
-    ❌ **Tesseract OCR is not installed on this server.**  
-    To fix this, create a file named `packages.txt` in the **same folder as app.py** with:
-    Then **redeploy** your app on Streamlit Cloud.
+Then **redeploy** your app on Streamlit Cloud.
 """)
 st.stop()
 
@@ -143,7 +104,7 @@ return model, le, acc
 # ------------------------------
 st.set_page_config(page_title="Kannada OCR", layout="centered")
 
-# --- Clean Header (no stray characters) ---
+# --- Clean Header ---
 st.markdown("""
 <style>
 @keyframes slideDown {
@@ -337,7 +298,7 @@ for generously providing high-quality palm leaf manuscript samples crucial to th
 st.markdown("""
 <hr>
 <div style='text-align:center; font-size: 0.9em; color: gray;'>
-📧 sajjanvsl@gmail.com &nbsp;|  📞 +91-9008802403 &nbsp;| 
+📧 sajjanvsl@gmail.com &nbsp;|  📞 +91-9008802403 &nbsp;| 
 🌐 <a href="https://rcub.ac.in" target="_blank">rcub.ac.in</a>
 </div>
 """, unsafe_allow_html=True)
