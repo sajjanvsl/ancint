@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Kannada OCR Web App – Streamlit Cloud Ready
+Handles Google Drive download errors gracefully.
 """
 
 import streamlit as st
@@ -14,14 +15,15 @@ import random
 import numpy as np
 import cv2
 import gdown
+from gdown.exceptions import FileURLRetrievalError
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import accuracy_score
 
 # ------------------------------
 #  TESSERACT CONFIGURATION
 # ------------------------------
-# Streamlit Cloud will install tesseract at /usr/bin/tesseract (via packages.txt)
 pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
 # ------------------------------
@@ -77,10 +79,23 @@ def prepare_classifier():
     folder_url = "https://drive.google.com/drive/folders/1G4CNR2WeaRP_s_c7lddnIyoQG2ck4nYm?usp=sharing"
     output_folder = "Dataset"
 
+    # Try to download the dataset only if it doesn't exist
     if not os.path.exists(output_folder):
         st.info("📥 Downloading dataset folder from Google Drive...")
-        gdown.download_folder(url=folder_url, output=output_folder, quiet=False, use_cookies=False)
-        st.success("✅ Dataset folder downloaded!")
+        try:
+            gdown.download_folder(url=folder_url, output=output_folder, quiet=False, use_cookies=False)
+            st.success("✅ Dataset folder downloaded!")
+        except FileURLRetrievalError as e:
+            st.warning(f"⚠️ Could not download dataset: {e}. Year prediction will be disabled.")
+            return None, None, 0.0
+        except Exception as e:
+            st.warning(f"⚠️ Unexpected error while downloading dataset: {e}. Year prediction disabled.")
+            return None, None, 0.0
+
+    # If the folder still doesn't exist, disable classifier
+    if not os.path.exists(output_folder):
+        st.warning("Dataset folder not found. Year prediction unavailable.")
+        return None, None, 0.0
 
     X, y = [], []
     IMG_SIZE = 64
@@ -109,6 +124,7 @@ def prepare_classifier():
     model = KNeighborsClassifier(n_neighbors=3)
     model.fit(X_train, y_train)
     acc = accuracy_score(y_test, model.predict(X_test))
+    st.success(f"✅ Year classifier loaded. Accuracy: {acc:.2f}")
     return model, le, acc
 
 # ------------------------------
@@ -135,19 +151,6 @@ st.markdown("""
     z-index: 100;
     border-bottom: 2px solid #d8cfc4;
     animation: slideDown 0.5s ease-out;
-}
-.header-logo {
-    display: block;
-    margin: 0 auto 5px auto;
-    width: 60px;
-    height: auto;
-}
-.header-text {
-    color:#800000;
-    font-weight:700;
-    text-align:center;
-    line-height: 1.2;
-    margin: 2px 0;
 }
 </style>
 
@@ -184,7 +187,7 @@ page = st.sidebar.radio(
     index=0
 )
 
-# Load classifier (cached)
+# Load classifier (cached, may be None)
 model, encoder, acc = prepare_classifier()
 
 # ------------------------------
@@ -199,11 +202,17 @@ if page == "📄 OCR Processor":
         method = st.sidebar.radio("Enhancement Method", ["adaptive", "otsu"])
         psm = st.sidebar.selectbox("Tesseract PSM Mode", [3, 4, 6, 11])
         show_enhanced = st.sidebar.checkbox("Show Enhanced Image", value=True)
-        predict_year = st.sidebar.checkbox("Predict Year of Document", value=True)
+
+        # Only show predict_year checkbox if classifier is available
+        predict_year = False
+        if model is not None:
+            predict_year = st.sidebar.checkbox("Predict Year of Document", value=True)
+        else:
+            st.sidebar.info("Year classifier not available (dataset missing).")
 
         image = Image.open(uploaded_file)
 
-        # ✂️ Manual crop section with rotation
+        # Manual crop with rotation
         if enable_crop:
             st.subheader("✂️ Crop & Rotate Image")
             rotation_angle = st.slider("🔄 Rotate Before Cropping (°)", min_value=0, max_value=360, step=90, value=0)
@@ -212,7 +221,7 @@ if page == "📄 OCR Processor":
                 st.image(image, caption=f"Rotated {rotation_angle}")
             image = st_cropper(image, realtime_update=True, box_color='blue')
 
-        # 🤖 Auto-crop (after rotation)
+        # Auto-crop
         if auto_crop:
             cropped = auto_crop_image(np.array(image.convert("RGB")))
             st.image(cropped, caption="Auto-Cropped Preview")
@@ -261,11 +270,10 @@ if page == "📄 OCR Processor":
 
         col1, col2 = st.columns(2)
         with col1:
-            st.metric("Translated Confidence", f"{confidence}%")
+            st.metric("Translation Confidence", f"{confidence}%")
         with col2:
             if predict_year and model is not None:
                 try:
-                    # Resize enhanced image for prediction
                     pred_img = cv2.resize(enhanced, (64, 64)).flatten().reshape(1, -1)
                     pred = model.predict(pred_img)
                     year = encoder.inverse_transform(pred)[0]
@@ -331,24 +339,6 @@ st.markdown("""
 
 st.markdown("""
 <style>
-.sticky-footer {
-    position: fixed;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    background-color: #fff8f0;
-    color: #800000;
-    text-align: center;
-    padding: 8px;
-    font-size: 14px;
-    border-top: 1px solid #ccc;
-    z-index: 999;
-}
-.sticky-footer a {
-    color: #800000;
-    text-decoration: none;
-    font-weight: bold;
-}
 #backToTopBtn {
     display: none;
     position: fixed;
