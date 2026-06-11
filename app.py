@@ -8,6 +8,7 @@ from PIL import Image
 from streamlit_cropper import st_cropper
 import pytesseract
 import os
+import shutil
 import pandas as pd
 from datetime import datetime
 import random
@@ -17,13 +18,20 @@ import gdown
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import accuracy_score   # <-- FIXED: added missing import
+from sklearn.metrics import accuracy_score
 
 # ------------------------------
-#  TESSERACT CONFIGURATION
+#  TESSERACT CONFIGURATION (Auto-detect)
 # ------------------------------
-# Streamlit Cloud will install tesseract at /usr/bin/tesseract (via packages.txt)
-pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
+# Find tesseract executable path
+tesseract_path = shutil.which("tesseract")
+if tesseract_path is None:
+    # Fallback for Streamlit Cloud default location
+    tesseract_path = "/usr/bin/tesseract"
+    if not os.path.exists(tesseract_path):
+        st.error("❌ Tesseract not found. Please ensure 'tesseract-ocr' and 'tesseract-ocr-kan' are installed via packages.txt")
+        st.stop()
+pytesseract.pytesseract.tesseract_cmd = tesseract_path
 
 # ------------------------------
 #  HELPER FUNCTIONS
