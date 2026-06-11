@@ -1,7 +1,6 @@
-# -- coding: utf-8 --
+# -*- coding: utf-8 -*-
 """
-Created on Sun Apr 27 09:46:46 2025
-@author: Admin
+Kannada OCR Web App – Streamlit Cloud Ready
 """
 
 import streamlit as st
@@ -14,21 +13,107 @@ from datetime import datetime
 import random
 import numpy as np
 import cv2
-import zipfile
 import gdown
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import accuracy_score
 
+# ------------------------------
+#  TESSERACT CONFIGURATION
+# ------------------------------
+# Streamlit Cloud will install tesseract at /usr/bin/tesseract (via packages.txt)
 pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
-def run_full_ocr(image_array, psm=6):
-    config = f"--psm {psm}"
-    return pytesseract.image_to_string(
-        Image.fromarray(image_array),
-        config=config
-    ).strip()
-    
+
+# ------------------------------
+#  HELPER FUNCTIONS
+# ------------------------------
+def rotate_image(image: Image.Image, angle: int) -> Image.Image:
+    return image.rotate(angle, expand=True)
+
+def auto_crop_image(image_np):
+    gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(blurred, 50, 150)
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if contours:
+        all_points = np.vstack(contours).astype(np.int32)
+        x, y, w, h = cv2.boundingRect(all_points)
+        return image_np[y:y + h, x:x + w]
+    return image_np
+
+def enhance_image(pil_image, method="adaptive"):
+    img = np.array(pil_image.convert("RGB"))
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    if method == "adaptive":
+        return cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 35, 15)
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return binary
+
+def run_full_ocr(image_array, psm=3):
+    """Single definition: uses Kannada language and configurable PSM."""
+    config = f'--oem 1 --psm {psm} -l kan'
+    return pytesseract.image_to_string(Image.fromarray(image_array), config=config).strip()
+
+def convert_old_to_new_kannada(text):
+    conversion_map = {
+        "ಮದುಮಕ್ಕಳಿಗೆ": "ಮಗುಗಳಿಗೆ",
+        "ಪಾಠಶಾಲೆ": "ಶಾಲೆ",
+        "ಅಂಗಡಿಗೆ": "ದೂಕಾಣಕ್ಕೆ",
+        "ಆಯ್ಕೆಯು": "ಆಯ್ಕೆ",
+        "ಅಧ್ಯಾಪಕರು": "ಶಿಕ್ಷಕರು",
+        "ಗ್ರಂಥ": "ಪುಸ್ತಕ",
+        "ಶಿಕ್ಷÊ3": "ಬೋಧನೆ",
+        "ಸಂಗತಿಗಳು": "ಮಾಹಿತಿಗಳು",
+        "ನೂತನ": "ಹೊಸ",
+        "ಪಾಠ": "ಪಾಠವು",
+        "ಬೋಧನೆ": "ಶಿಕ್ಷಣ"
+    }
+    for old_word, new_word in conversion_map.items():
+        text = text.replace(old_word, new_word)
+    return text
+
+@st.cache_resource
+def prepare_classifier():
+    folder_url = "https://drive.google.com/drive/folders/1G4CNR2WeaRP_s_c7lddnIyoQG2ck4nYm?usp=sharing"
+    output_folder = "Dataset"
+
+    if not os.path.exists(output_folder):
+        st.info("📥 Downloading dataset folder from Google Drive...")
+        gdown.download_folder(url=folder_url, output=output_folder, quiet=False, use_cookies=False)
+        st.success("✅ Dataset folder downloaded!")
+
+    X, y = [], []
+    IMG_SIZE = 64
+    for folder in os.listdir(output_folder):
+        path = os.path.join(output_folder, folder)
+        if os.path.isdir(path):
+            for file in os.listdir(path):
+                try:
+                    img = cv2.imread(os.path.join(path, file), cv2.IMREAD_GRAYSCALE)
+                    if img is not None:
+                        img = cv2.resize(img, (IMG_SIZE, IMG_SIZE))
+                        X.append(img.flatten())
+                        y.append(folder)
+                except:
+                    continue
+
+    if len(X) == 0:
+        st.error("No images found in dataset. Year classifier will be unavailable.")
+        return None, None, 0.0
+
+    le = LabelEncoder()
+    y_enc = le.fit_transform(y)
+    X_train, X_test, y_train, y_test = train_test_split(
+        np.array(X), y_enc, test_size=0.2, random_state=42
+    )
+    model = KNeighborsClassifier(n_neighbors=3)
+    model.fit(X_train, y_train)
+    acc = accuracy_score(y_test, model.predict(X_test))
+    return model, le, acc
+
+# ------------------------------
+#  PAGE CONFIGURATION
+# ------------------------------
 st.set_page_config(page_title="Kannada OCR", layout="centered")
 
 # --- Header Banner ---
@@ -66,7 +151,6 @@ st.markdown("""
 }
 </style>
 
-
 <div class='sticky-title'>Kannada OCR Web App</div>
 
 <h3 style='color:#800000; font-weight:700; text-align:center;'>
@@ -100,87 +184,13 @@ page = st.sidebar.radio(
     index=0
 )
 
-# --- OCR Utilities ---
-def rotate_image(image: Image.Image, angle: int) -> Image.Image:
-    return image.rotate(angle, expand=True)
-def auto_crop_image(image_np):
-    gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Canny(blurred, 50, 150)
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if contours:
-        all_points = np.vstack(contours).astype(np.int32)
-        x, y, w, h = cv2.boundingRect(all_points)
-        return image_np[y:y + h, x:x + w]
-    return image_np
+# Load classifier (cached)
+model, encoder, acc = prepare_classifier()
 
-def enhance_image(pil_image, method="adaptive"):
-    img = np.array(pil_image.convert("RGB"))
-    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-    if method == "adaptive":
-        return cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 35, 15)
-    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    return binary
-
-def run_full_ocr(image_array, psm=3):
-    config = f'--oem 1 --psm {psm} -l kan'
-    return pytesseract.image_to_string(Image.fromarray(image_array), config=config).strip()
-
-def convert_old_to_new_kannada(text):
-    conversion_map = {
-        "ಮದುಮಕ್ಕಳಿಗೆ": "ಮಗುಗಳಿಗೆ",
-        "ಪಾಠಶಾಲೆ": "ಶಾಲೆ",
-        "ಅಂಗಡಿಗೆ": "ದೂಕಾಣಕ್ಕೆ",
-        "ಆಯ್ಕೆಯು": "ಆಯ್ಕೆ",
-        "ಅಧ್ಯಾಪಕರು": "ಶಿಕ್ಷಕರು",
-        "ಗ್ರಂಥ": "ಪುಸ್ತಕ",
-        "ಶಿಕ್ಷÊ3": "ಬೋಧನೆ",
-        "ಸಂಗತಿಗಳು": "ಮಾಹಿತಿಗಳು",
-        "ನೂತನ": "ಹೊಸ",
-        "ಪಾಠ": "ಪಾಠವು",
-        "ಬೋಧನೆ": "ಶಿಕ್ಷಣ"
-    }
-    for old_word, new_word in conversion_map.items():
-        text = text.replace(old_word, new_word)
-    return text
-
-@st.cache_resource
-def prepare_classifier():
-    folder_url = "https://drive.google.com/drive/folders/1G4CNR2WeaRP_s_c7lddnIyoQG2ck4nYm?usp=sharing"
-    output_folder = "Dataset"
-    
-    if not os.path.exists(output_folder):
-        st.info("📥 Downloading dataset folder from Google Drive...")
-        gdown.download_folder(url=folder_url, output=output_folder, quiet=False, use_cookies=False)
-        st.success("✅ Dataset folder downloaded!")
-    # ✅ Load dataset for KNN year classifier
-    X, y = [], []
-    IMG_SIZE = 64
-    for folder in os.listdir(output_folder):
-        path = os.path.join(output_folder, folder)
-        if os.path.isdir(path):
-            for file in os.listdir(path):
-                try:
-                    img = cv2.imread(os.path.join(path, file), cv2.IMREAD_GRAYSCALE)
-                    img = cv2.resize(img, (IMG_SIZE, IMG_SIZE))
-                    X.append(img.flatten())
-                    y.append(folder)
-                except:
-                    continue
-
-    le = LabelEncoder()
-    y_enc = le.fit_transform(y)
-    X_train, X_test, y_train, y_test = train_test_split(
-        np.array(X), y_enc, test_size=0.2, random_state=42
-    )
-    model = KNeighborsClassifier(n_neighbors=3)
-    model.fit(X_train, y_train)
-
-    return model, le, accuracy_score(y_test, model.predict(X_test))
-model, encoder, _ = prepare_classifier()
-
+# ------------------------------
+#  MAIN PAGE - OCR PROCESSOR
+# ------------------------------
 if page == "📄 OCR Processor":
-
     st.sidebar.header("🎛️ Kannada OCR Controls")
     uploaded_file = st.sidebar.file_uploader("Upload Old Kannada Image", type=["jpg", "jpeg", "png", "bmp"])
     if uploaded_file is not None:
@@ -190,37 +200,35 @@ if page == "📄 OCR Processor":
         psm = st.sidebar.selectbox("Tesseract PSM Mode", [3, 4, 6, 11])
         show_enhanced = st.sidebar.checkbox("Show Enhanced Image", value=True)
         predict_year = st.sidebar.checkbox("Predict Year of Document", value=True)
-       
 
         image = Image.open(uploaded_file)
 
-        # ✂️ Manual crop section with rotation integrated
+        # ✂️ Manual crop section with rotation
         if enable_crop:
             st.subheader("✂️ Crop & Rotate Image")
-
-            # Rotation angle input here, within the crop section
             rotation_angle = st.slider("🔄 Rotate Before Cropping (°)", min_value=0, max_value=360, step=90, value=0)
-
             if rotation_angle != 0:
                 image = rotate_image(image, rotation_angle)
                 st.image(image, caption=f"Rotated {rotation_angle}")
-
             image = st_cropper(image, realtime_update=True, box_color='blue')
 
-        # 🤖 Auto-crop option (applies after rotation if enabled)
+        # 🤖 Auto-crop (after rotation)
         if auto_crop:
             cropped = auto_crop_image(np.array(image.convert("RGB")))
             st.image(cropped, caption="Auto-Cropped Preview")
             image = Image.fromarray(cropped)
 
-        # 📷 Show original image before enhancement
+        # Show original
         st.image(image, caption="Original Image", use_container_width=True)
-        # ⬛ Enhancement
+
+        # Enhancement
         enhanced = enhance_image(image, method)
 
         if show_enhanced:
             st.image(enhanced, caption="Enhanced Image", clamp=True)
-            st.download_button("📥 Download Enhanced Image", cv2.imencode(".png", enhanced)[1].tobytes(), file_name="enhanced.png")
+            st.download_button("📥 Download Enhanced Image",
+                               cv2.imencode(".png", enhanced)[1].tobytes(),
+                               file_name="enhanced.png")
 
         with st.spinner("🔍 Running OCR..."):
             raw_text = run_full_ocr(enhanced, psm)
@@ -228,7 +236,6 @@ if page == "📄 OCR Processor":
             translated = convert_old_to_new_kannada(raw_text)
 
         st.subheader("📝 OCR Output")
-
         col1, col2 = st.columns(2)
 
         with col1:
@@ -239,30 +246,38 @@ if page == "📄 OCR Processor":
             st.markdown("*📝 Hosa Kannada Translation*")
             final_edit = st.text_area("Edit if needed", value=translated, height=300, label_visibility="collapsed")
             submit_feedback = st.button("✅ Submit Feedback", key="submit_feedback_translation")
+
         if submit_feedback:
             row = {
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "old_kannada": raw_text,
-                    "corrected": final_edit,
-                    "confidence": confidence
-                    }
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "old_kannada": raw_text,
+                "corrected": final_edit,
+                "confidence": confidence
+            }
             df = pd.read_csv("feedback.csv") if os.path.exists("feedback.csv") else pd.DataFrame(columns=row.keys())
             df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
             df.to_csv("feedback.csv", index=False)
             st.success("✅ Feedback Saved!")
+
         col1, col2 = st.columns(2)
         with col1:
             st.metric("Translated Confidence", f"{confidence}%")
         with col2:
-            if predict_year:
-                pred = model.predict(cv2.resize(enhanced, (64, 64)).flatten().reshape(1, -1))
-                year = encoder.inverse_transform(pred)[0]
-                st.metric("This manuscript belongs to apprimate year or Predicted Year", year)
+            if predict_year and model is not None:
+                try:
+                    # Resize enhanced image for prediction
+                    pred_img = cv2.resize(enhanced, (64, 64)).flatten().reshape(1, -1)
+                    pred = model.predict(pred_img)
+                    year = encoder.inverse_transform(pred)[0]
+                    st.metric("Predicted Year", year)
+                except Exception as e:
+                    st.warning(f"Year prediction failed: {e}")
 
         st.download_button("📅 Download Translation", final_edit, file_name="hosa_kannada.txt")
 
-     
-
+# ------------------------------
+#  OTHER PAGES
+# ------------------------------
 elif page == "📘 How to Use":
     st.header("📘 User Instructions")
     st.markdown("""
@@ -303,7 +318,9 @@ elif page == "🙏 Acknowledgements":
     👍 Facebook: [facebook.com/domlurashok](https://www.facebook.com/domlurashok)
     """)
 
-# --- Footer ---
+# ------------------------------
+#  FOOTER
+# ------------------------------
 st.markdown("""
 <hr>
 <div style='text-align:center; font-size: 0.9em; color: gray;'>
@@ -332,11 +349,6 @@ st.markdown("""
     text-decoration: none;
     font-weight: bold;
 }
-</style>
-""", unsafe_allow_html=True)
-
-st.markdown("""
-<style>
 #backToTopBtn {
     display: none;
     position: fixed;
