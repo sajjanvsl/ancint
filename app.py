@@ -1,11 +1,54 @@
+# -*- coding: utf-8 -*-
+"""
+Kannada OCR Web App – Streamlit Cloud Ready
+"""
 
-Then **redeploy** your app on Streamlit Cloud.  
-For local testing, install Tesseract from https://github.com/tesseract-ocr/tesseract
+import streamlit as st
+from PIL import Image
+from streamlit_cropper import st_cropper
+import pytesseract
+import os
+import pandas as pd
+from datetime import datetime
+import random
+import numpy as np
+import cv2
+import gdown
+from gdown.exceptions import FileURLRetrievalError
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import accuracy_score
+import shutil
+
+# ------------------------------
+# TESSERACT AUTO-CONFIGURATION
+# ------------------------------
+tesseract_path = shutil.which("tesseract")
+if tesseract_path is None:
+    possible_paths = ["/usr/bin/tesseract", "/app/.apt/usr/bin/tesseract"]
+    for p in possible_paths:
+        if os.path.exists(p):
+            tesseract_path = p
+            break
+
+if tesseract_path:
+    pytesseract.pytesseract.tesseract_cmd = tesseract_path
+else:
+    st.error("""
+    ❌ **Tesseract OCR is not installed on this server.**  
+    To fix this, create a file named `packages.txt` in the **same folder as app.py** with:
+tesseract-ocr
+tesseract-ocr-kan
+
+text
+
+Then **redeploy** your app on Streamlit Cloud.
 """)
 st.stop()
 
 # ------------------------------
-#  HELPER FUNCTIONS
+# HELPER FUNCTIONS
 # ------------------------------
 def rotate_image(image: Image.Image, angle: int) -> Image.Image:
 return image.rotate(angle, expand=True)
@@ -62,14 +105,14 @@ if not os.path.exists(output_folder):
         gdown.download_folder(url=folder_url, output=output_folder, quiet=False, use_cookies=False)
         st.success("✅ Dataset folder downloaded!")
     except FileURLRetrievalError as e:
-        st.warning(f"⚠️ Could not download dataset: {e}. Year prediction will be disabled.")
+        st.warning(f"⚠️ Could not download dataset: {e}. Year prediction disabled.")
         return None, None, 0.0
     except Exception as e:
-        st.warning(f"⚠️ Unexpected error while downloading dataset: {e}. Year prediction disabled.")
+        st.warning(f"⚠️ Error: {e}. Year prediction disabled.")
         return None, None, 0.0
 
 if not os.path.exists(output_folder):
-    st.warning("Dataset folder not found. Year prediction unavailable.")
+    st.warning("Dataset folder missing. Year prediction unavailable.")
     return None, None, 0.0
 
 X, y = [], []
@@ -88,14 +131,12 @@ for folder in os.listdir(output_folder):
                 continue
 
 if len(X) == 0:
-    st.error("No images found in dataset. Year classifier will be unavailable.")
+    st.error("No images found in dataset.")
     return None, None, 0.0
 
 le = LabelEncoder()
 y_enc = le.fit_transform(y)
-X_train, X_test, y_train, y_test = train_test_split(
-    np.array(X), y_enc, test_size=0.2, random_state=42
-)
+X_train, X_test, y_train, y_test = train_test_split(np.array(X), y_enc, test_size=0.2, random_state=42)
 model = KNeighborsClassifier(n_neighbors=3)
 model.fit(X_train, y_train)
 acc = accuracy_score(y_test, model.predict(X_test))
@@ -103,11 +144,11 @@ st.success(f"✅ Year classifier loaded. Accuracy: {acc:.2f}")
 return model, le, acc
 
 # ------------------------------
-#  PAGE CONFIGURATION
+# PAGE CONFIGURATION
 # ------------------------------
 st.set_page_config(page_title="Kannada OCR", layout="centered")
 
-# --- Header Banner ---
+# --- Clean Header (no stray characters) ---
 st.markdown("""
 <style>
 @keyframes slideDown {
@@ -162,11 +203,10 @@ options=["📄 OCR Processor", "📘 How to Use", "👨‍💻 Developer Info", 
 index=0
 )
 
-# Load classifier (may be None)
 model, encoder, acc = prepare_classifier()
 
 # ------------------------------
-#  MAIN PAGE - OCR PROCESSOR
+# OCR PROCESSOR PAGE
 # ------------------------------
 if page == "📄 OCR Processor":
 st.sidebar.header("🎛️ Kannada OCR Controls")
@@ -254,7 +294,7 @@ if uploaded_file is not None:
     st.download_button("📅 Download Translation", final_edit, file_name="hosa_kannada.txt")
 
 # ------------------------------
-#  OTHER PAGES
+# OTHER PAGES
 # ------------------------------
 elif page == "📘 How to Use":
 st.header("📘 User Instructions")
@@ -297,12 +337,12 @@ for generously providing high-quality palm leaf manuscript samples crucial to th
 """)
 
 # ------------------------------
-#  FOOTER
+# FOOTER
 # ------------------------------
 st.markdown("""
 <hr>
 <div style='text-align:center; font-size: 0.9em; color: gray;'>
-📧 sajjanvsl@gmail.com &nbsp;|  📞 +91-9008802403 &nbsp;| 
+📧 sajjanvsl@gmail.com &nbsp;|  📞 +91-9008802403 &nbsp;| 
 🌐 <a href="https://rcub.ac.in" target="_blank">rcub.ac.in</a>
 </div>
 """, unsafe_allow_html=True)
