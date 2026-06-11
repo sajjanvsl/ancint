@@ -17,6 +17,7 @@ import gdown
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import accuracy_score   # <-- FIXED: added missing import
 
 # ------------------------------
 #  TESSERACT CONFIGURATION
@@ -79,8 +80,12 @@ def prepare_classifier():
 
     if not os.path.exists(output_folder):
         st.info("📥 Downloading dataset folder from Google Drive...")
-        gdown.download_folder(url=folder_url, output=output_folder, quiet=False, use_cookies=False)
-        st.success("✅ Dataset folder downloaded!")
+        try:
+            gdown.download_folder(url=folder_url, output=output_folder, quiet=False, use_cookies=False)
+            st.success("✅ Dataset folder downloaded!")
+        except Exception as e:
+            st.error(f"Failed to download dataset: {e}")
+            return None, None, 0.0
 
     X, y = [], []
     IMG_SIZE = 64
