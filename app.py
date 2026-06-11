@@ -38,12 +38,7 @@ else:
     st.error("""
     ❌ **Tesseract OCR is not installed on this server.**  
     To fix this, create a file named `packages.txt` in the **same folder as app.py** with:
-tesseract-ocr
-tesseract-ocr-kan
-
-text
-
-Then **redeploy** your app on Streamlit Cloud.
+    Then **redeploy** your app on Streamlit Cloud.
 """)
 st.stop()
 
