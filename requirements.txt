@@ -1,9 +1,9 @@
 streamlit
+streamlit-cropper
 pytesseract
-opencv-python-headless
+pillow
+opencv-python
 numpy
 pandas
-Pillow
 scikit-learn
 gdown
-streamlit-cropper
